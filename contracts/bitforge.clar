@@ -255,3 +255,108 @@
     (ok option-id)
   )
 )
+
+(define-public (acquire-option
+    (sbtc-token <sip010-fungible-token>)
+    (option-id uint)
+  )
+  (let ((option-data (unwrap! (get-option-details option-id) ERR-OPTION-NOT-FOUND)))
+    ;; Validation checks
+    (asserts! (< stacks-block-height (get expiry-block option-data)) ERR-EXPIRED)
+    (asserts! (not (get is-settled option-data)) ERR-ALREADY-SETTLED)
+    (asserts! (not (is-eq tx-sender (get writer option-data))) ERR-UNAUTHORIZED)
+
+    ;; Premium payment to option writer
+    (try! (execute-token-transfer sbtc-token (get premium option-data) tx-sender
+      (get writer option-data)
+    ))
+
+    ;; Transfer option ownership
+    (map-set option-contracts { id: option-id }
+      (merge option-data { holder: tx-sender })
+    )
+
+    ;; Update trading metrics
+    (var-set total-volume (+ (var-get total-volume) (get premium option-data)))
+    (update-user-position tx-sender 1)
+
+    (ok true)
+  )
+)
+
+(define-public (execute-option
+    (sbtc-token <sip010-fungible-token>)
+    (option-id uint)
+  )
+  (let (
+      (option-data (unwrap! (get-option-details option-id) ERR-OPTION-NOT-FOUND))
+      (market-price (get-current-btc-price))
+    )
+    ;; Authorization and state validation
+    (asserts! (is-eq tx-sender (get holder option-data)) ERR-UNAUTHORIZED)
+    (asserts! (< stacks-block-height (get expiry-block option-data)) ERR-EXPIRED)
+    (asserts! (not (get is-settled option-data)) ERR-ALREADY-SETTLED)
+
+    ;; Profitability check for exercise
+    (if (is-eq (get option-type option-data) CALL)
+      (asserts! (> market-price (get strike-price option-data))
+        ERR-INVALID-AMOUNT
+      )
+      (asserts! (< market-price (get strike-price option-data))
+        ERR-INVALID-AMOUNT
+      )
+    )
+
+    ;; Execute settlement - transfer collateral to holder
+    (try! (execute-token-transfer sbtc-token (get collateral option-data)
+      (as-contract tx-sender) tx-sender
+    ))
+
+    ;; Finalize contract state
+    (map-set option-contracts { id: option-id }
+      (merge option-data { is-settled: true })
+    )
+
+    ;; Update global metrics
+    (var-set active-options (- (var-get active-options) u1))
+    (update-user-position tx-sender -1)
+
+    (ok true)
+  )
+)
+
+(define-public (claim-expired-collateral
+    (sbtc-token <sip010-fungible-token>)
+    (option-id uint)
+  )
+  (let ((option-data (unwrap! (get-option-details option-id) ERR-OPTION-NOT-FOUND)))
+    ;; Validate expiry and ownership
+    (asserts! (is-ok (contract-call? sbtc-token get-name)) ERR-UNAUTHORIZED)
+    (asserts! (>= stacks-block-height (get expiry-block option-data)) ERR-NOT-EXPIRED)
+    (asserts! (not (get is-settled option-data)) ERR-ALREADY-SETTLED)
+    (asserts! (is-eq tx-sender (get writer option-data)) ERR-UNAUTHORIZED)
+
+    ;; Return locked collateral to writer
+    (try! (as-contract (contract-call? sbtc-token transfer (get collateral option-data)
+      tx-sender (get writer option-data) none
+    )))
+
+    ;; Mark as settled
+    (map-set option-contracts { id: option-id }
+      (merge option-data { is-settled: true })
+    )
+
+    ;; Update metrics
+    (var-set active-options (- (var-get active-options) u1))
+
+    (ok true)
+  )
+)
+
+;; PROTOCOL INITIALIZATION
+
+(begin
+  (var-set option-counter u1)
+  (var-set total-volume u0)
+  (var-set active-options u0)
+)
