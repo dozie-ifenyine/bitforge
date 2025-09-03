@@ -87,3 +87,90 @@
 (define-data-var option-counter uint u1)
 (define-data-var total-volume uint u0)
 (define-data-var active-options uint u0)
+
+;; DATA STRUCTURES
+
+(define-map option-contracts
+  { id: uint }
+  {
+    writer: principal,
+    holder: principal,
+    option-type: (string-ascii 4),
+    strike-price: uint,
+    premium: uint,
+    collateral: uint,
+    expiry-block: uint,
+    is-settled: bool,
+    created-block: uint,
+  }
+)
+
+(define-map user-positions
+  { user: principal }
+  { active-contracts: uint }
+)
+
+;; PRIVATE HELPER FUNCTIONS
+
+(define-private (is-valid-option-type (option-type (string-ascii 4)))
+  (or (is-eq option-type CALL) (is-eq option-type PUT))
+)
+
+(define-private (execute-token-transfer
+    (token <sip010-fungible-token>)
+    (amount uint)
+    (from principal)
+    (to principal)
+  )
+  (begin
+    (asserts! (> amount u0) ERR-ZERO-VALUE)
+    (contract-call? token transfer amount from to none)
+  )
+)
+
+(define-private (validate-expiry (expiry uint))
+  (let (
+      (min-expiry (+ stacks-block-height MIN-EXPIRY-BLOCKS))
+      (max-expiry (+ stacks-block-height MAX-EXPIRY-BLOCKS))
+    )
+    (asserts! (and (>= expiry min-expiry) (<= expiry max-expiry))
+      ERR-INVALID-EXPIRY
+    )
+    (ok true)
+  )
+)
+
+(define-private (validate-strike-price (strike uint))
+  (begin
+    (asserts! (> strike u0) ERR-INVALID-STRIKE)
+    (ok true)
+  )
+)
+
+(define-private (is-valid-token-contract (token <sip010-fungible-token>))
+  ;; Basic validation that the token contract implements required functions
+  (is-ok (contract-call? token get-name))
+)
+
+(define-private (update-user-position
+    (user principal)
+    (delta int)
+  )
+  (let ((current-pos (default-to { active-contracts: u0 } (map-get? user-positions { user: user }))))
+    (map-set user-positions { user: user } { active-contracts: (if (> delta 0)
+      (+ (get active-contracts current-pos) (to-uint delta))
+      (- (get active-contracts current-pos) (to-uint (* delta -1)))
+    ) }
+    )
+  )
+)
+
+;; READ-ONLY FUNCTIONS
+
+(define-read-only (get-option-details (option-id uint))
+  (map-get? option-contracts { id: option-id })
+)
+
+(define-read-only (get-user-stats (user principal))
+  (default-to { active-contracts: u0 } (map-get? user-positions { user: user }))
+)
