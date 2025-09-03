@@ -174,3 +174,84 @@
 (define-read-only (get-user-stats (user principal))
   (default-to { active-contracts: u0 } (map-get? user-positions { user: user }))
 )
+
+(define-read-only (get-current-btc-price)
+  ;; In production, this would connect to a price oracle
+  u5000000000000
+)
+;; $50,000 USD with 8 decimal precision
+
+(define-read-only (get-protocol-metrics)
+  {
+    total-options-created: (- (var-get option-counter) u1),
+    total-trading-volume: (var-get total-volume),
+    active-option-count: (var-get active-options),
+    next-option-id: (var-get option-counter),
+  }
+)
+
+(define-read-only (calculate-intrinsic-value (option-id uint))
+  (match (get-option-details option-id)
+    option-data
+    (let (
+        (current-price (get-current-btc-price))
+        (strike (get strike-price option-data))
+      )
+      (if (is-eq (get option-type option-data) CALL)
+        (if (> current-price strike)
+          (- current-price strike)
+          u0
+        )
+        (if (< current-price strike)
+          (- strike current-price)
+          u0
+        )
+      )
+    )
+    u0  ;; Return 0 if option not found
+  )
+)
+
+;; CORE PROTOCOL FUNCTIONS
+
+(define-public (forge-option
+    (sbtc-token <sip010-fungible-token>)
+    (option-type (string-ascii 4))
+    (strike-price uint)
+    (premium uint)
+    (collateral uint)
+    (expiry-block uint)
+  )
+  (let ((option-id (var-get option-counter)))
+    ;; Comprehensive input validation
+    (asserts! (is-valid-option-type option-type) ERR-INVALID-TYPE)
+    (try! (validate-strike-price strike-price))
+    (try! (validate-expiry expiry-block))
+    (asserts! (and (> premium u0) (> collateral u0)) ERR-ZERO-VALUE)
+
+    ;; Secure collateral transfer to contract
+    (try! (execute-token-transfer sbtc-token collateral tx-sender
+      (as-contract tx-sender)
+    ))
+
+    ;; Create option contract
+    (map-set option-contracts { id: option-id } {
+      writer: tx-sender,
+      holder: tx-sender,
+      option-type: option-type,
+      strike-price: strike-price,
+      premium: premium,
+      collateral: collateral,
+      expiry-block: expiry-block,
+      is-settled: false,
+      created-block: stacks-block-height,
+    })
+
+    ;; Update protocol state
+    (var-set option-counter (+ option-id u1))
+    (var-set active-options (+ (var-get active-options) u1))
+    (update-user-position tx-sender 1)
+
+    (ok option-id)
+  )
+)
